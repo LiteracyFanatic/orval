@@ -11,7 +11,11 @@ import {
 } from '../utils';
 import { generateImportsForBuilder } from './generate-imports-for-builder';
 import { generateTarget } from './target';
-import { getOrvalGeneratedTypes, getTypedResponse } from './types';
+import {
+  getExpandHelper,
+  getOrvalGeneratedTypes,
+  getTypedResponse,
+} from './types';
 
 export const writeSingleMode = async ({
   builder,
@@ -82,6 +86,18 @@ export const writeSingleMode = async ({
       output,
     });
 
+    // If schemas folder is configured and Expand is used, import the helper once
+    if (output.schemas && implementation.includes('Expand<')) {
+      const schemasDir = getFileInfo(output.schemas, {
+        extension: output.fileExtension,
+      }).dirname;
+      const rel = upath.relativeSafe(dirname, schemasDir);
+      const importLine = `import type { Expand } from '${rel}/__orval__';\n`;
+      if (!data.includes(importLine)) {
+        data += importLine;
+      }
+    }
+
     if (output.mock) {
       const importsMockForBuilder = schemasPath
         ? generateImportsForBuilder(output, importsMock, schemasPath)
@@ -122,6 +138,12 @@ export const writeSingleMode = async ({
 
     if (implementation.includes('NonReadonly<')) {
       data += getOrvalGeneratedTypes();
+      data += '\n';
+    }
+
+    // Handle Expand helper: inline if no schemas dir, else ensure it's imported from schemas helper
+    if (implementation.includes('Expand<') && !output.schemas) {
+      data += getExpandHelper();
       data += '\n';
     }
 

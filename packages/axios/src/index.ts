@@ -15,9 +15,15 @@ import {
   GeneratorVerbOptions,
   isSyntheticDefaultImportsAllow,
   pascal,
+  resolveRef,
   sanitize,
   toObjectString,
 } from '@orval/core';
+import type {
+  ParameterObject,
+  PathItemObject,
+  ReferenceObject,
+} from 'openapi3-ts/oas30';
 
 const AXIOS_DEPENDENCIES: GeneratorDependency[] = [
   {
@@ -74,13 +80,16 @@ const generateAxiosImplementation = (
     formUrlEncoded,
     paramsSerializer,
   }: GeneratorVerbOptions,
-  { route, context }: GeneratorOptions,
+  { route, context, pathRoute }: GeneratorOptions,
 ) => {
   const isRequestOptions = override?.requestOptions !== false;
   const isFormData = !override?.formData.disabled;
   const isFormUrlEncoded = override?.formUrlEncoded !== false;
   const isExactOptionalPropertyTypes =
     !!context.output.tsconfig?.compilerOptions?.exactOptionalPropertyTypes;
+  const usesFormPayload =
+    (isFormData && Boolean(body.formData)) ||
+    (isFormUrlEncoded && Boolean(body.formUrlEncoded));
 
   const isSyntheticDefaultImportsAllowed = isSyntheticDefaultImportsAllow(
     context.output.tsconfig,
@@ -94,10 +103,40 @@ const generateAxiosImplementation = (
     isFormUrlEncoded,
   });
 
+  // tolerate mixed type versions by using a safe access
+  const useSingleRequestArg = override.useSingleRequestArgument;
+  const bodyFormReplaced =
+    useSingleRequestArg && body.definition
+      ? bodyForm.replaceAll(body.implementation, 'request')
+      : bodyForm;
+
   if (mutator) {
+    // Collect param names for destructuring and building params/headers
+    const spec = context.specs[context.specKey].paths[pathRoute] as
+      | PathItemObject
+      | undefined;
+    const parameters = (spec?.[verb as keyof PathItemObject]?.parameters ??
+      []) as (ParameterObject | ReferenceObject)[];
+    const queryParamNames = parameters
+      .map((p) => resolveRef<ParameterObject>(p, context).schema)
+      .filter((s) => s.in === 'query')
+      .map((s) => s.name);
+    const headerParamNames = parameters
+      .map((p) => resolveRef<ParameterObject>(p, context).schema)
+      .filter((s) => s.in === 'header')
+      .map((s) => s.name)
+      // filter out invalid identifiers to be safe
+      .filter((n) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n));
+    const pathParamNames = props
+      .filter((p) => p.type === 'param')
+      .map((p) => p.name as string);
+
     const mutatorConfig = generateMutatorConfig({
       route,
-      body,
+      body:
+        useSingleRequestArg && body.definition
+          ? { ...body, implementation: 'data' }
+          : body,
       headers,
       queryParams,
       response,
@@ -135,6 +174,126 @@ const generateAxiosImplementation = (
           )
         : toObjectString(props, 'implementation');
 
+    if (useSingleRequestArg) {
+      const requestTypeName = `${pascal(operationName)}Request`;
+      const intersectionParts: string[] = [];
+      if (body.definition) intersectionParts.push(body.definition);
+      if (queryParams) intersectionParts.push(queryParams.schema.name);
+      if (headers) intersectionParts.push(headers.schema.name);
+      let pathParamsTypeName = '';
+      let pathParamsTypeDef = '';
+      const namedPathParamSchema = props.find(
+        (p) => p.type === 'namedPathParams',
+      )?.schema.name;
+      if (namedPathParamSchema) {
+        intersectionParts.push(namedPathParamSchema);
+      } else if (pathParamNames.length > 0) {
+        // fallback: inline object when no named schema is available
+        const pathDefs = props
+          .filter((p) => p.type === 'param')
+          .map((p) => p.definition)
+          .join(',\n ');
+        pathParamsTypeName = `${pascal(operationName)}PathParams`;
+        pathParamsTypeDef = `export type ${pathParamsTypeName} = {\n ${pathDefs}\n }`;
+        intersectionParts.push(pathParamsTypeName);
+      }
+      const requestTypeDef = `export type ${requestTypeName} = Expand<${
+        intersectionParts.length > 0
+          ? intersectionParts.join(' & ')
+          : 'Record<string, never>'
+      }>`;
+
+      const isValidIdent = (n: string) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n);
+      const braceParams = (pathRoute.match(/\{([^}]+)\}/g) ?? [])
+        .map((s) => s.slice(1, -1))
+        .filter(Boolean);
+      const templateParams = (route.match(/\$\{([^}]+)\}/g) ?? []).map((s) =>
+        s.slice(2, -1),
+      );
+      const routeParamNames = [
+        ...new Set([...braceParams, ...templateParams]),
+      ].filter((element) => isValidIdent(element));
+      const validQuery = queryParamNames.filter((element) =>
+        isValidIdent(element),
+      );
+      const validHeader = headerParamNames.filter((element) =>
+        isValidIdent(element),
+      );
+      const namedProp = props.find((p) => p.type === 'namedPathParams');
+      const namedDestruct =
+        namedProp?.destructured
+          .replaceAll(/[{}]/g, '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean) ?? [];
+      const namedSchemaModel = namedProp?.schema.model;
+      const namesFromModel =
+        namedDestruct.length === 0 && namedSchemaModel
+          ? [
+              ...namedSchemaModel.matchAll(
+                /\n\s*([A-Za-z_$][A-Za-z0-9_$]*)\??:/g,
+              ),
+            ].map((m) => m[1])
+          : [];
+      const destructNames = [
+        ...new Set<string>([
+          ...pathParamNames,
+          ...routeParamNames,
+          ...namedDestruct,
+          ...namesFromModel,
+          ...validQuery,
+          ...validHeader,
+        ]),
+      ];
+      const destruct = destructNames.join(', ');
+      const hasDataSpread = Boolean(body.definition && !usesFormPayload);
+      const hasDestructNames = destruct.length > 0;
+      const destructContent =
+        hasDestructNames && hasDataSpread
+          ? `${destruct}, ...data`
+          : hasDestructNames
+            ? destruct
+            : hasDataSpread
+              ? '...data'
+              : '';
+      const destructLine = destructContent
+        ? `\n  const { ${destructContent} } = request;`
+        : '';
+
+      const paramsInit = queryParams
+        ? `const params = { ${queryParamNames
+            .map((n: string) =>
+              isValidIdent(n) ? n : `'${n}': request['${n}']`,
+            )
+            .join(', ')} };`
+        : '';
+      const headersInit = headers
+        ? `const headers = { ${headerParamNames
+            .map((n: string) =>
+              isValidIdent(n) ? n : `'${n}': request['${n}']`,
+            )
+            .join(', ')} };`
+        : '';
+
+      const fn = `const ${operationName} = (\n    request: ${requestTypeName}${
+        isRequestOptions && mutator.hasSecondArg
+          ? `, options${context.output.optionsParamRequired ? '' : '?'}: SecondParameter<typeof ${mutator.name}<${
+              response.definition.success || 'unknown'
+            }>>`
+          : ''
+      }\n ) => {${destructLine}
+    ${bodyFormReplaced}
+  ${paramsInit}
+  ${headersInit}
+      return ${mutator.name}<${response.definition.success || 'unknown'}>(
+      ${mutatorConfig},
+      ${isRequestOptions && mutator.hasSecondArg ? 'options' : ''});
+    }\n`;
+
+      // Ensure function is exported by placing it first (the caller prefixes implementation with 'export ')
+      return `${fn}\n${requestTypeDef}${pathParamsTypeDef ? `\n${pathParamsTypeDef}` : ''}`;
+    }
+
     return `const ${operationName} = (\n    ${propsImplementation}\n ${
       isRequestOptions && mutator.hasSecondArg
         ? `options${context.output.optionsParamRequired ? '' : '?'}: SecondParameter<typeof ${mutator.name}<${response.definition.success || 'unknown'}>>,`
@@ -149,7 +308,10 @@ const generateAxiosImplementation = (
 
   const options = generateOptions({
     route,
-    body,
+    body:
+      useSingleRequestArg && body.definition
+        ? { ...body, implementation: 'data' }
+        : body,
     headers,
     queryParams,
     response,
@@ -171,15 +333,154 @@ const generateAxiosImplementation = (
       }>`,
   );
 
+  if (useSingleRequestArg) {
+    // Collect param names for destructuring and building params/headers
+    const spec = context.specs[context.specKey].paths[pathRoute] as
+      | PathItemObject
+      | undefined;
+    const parameters = (spec?.[verb as keyof PathItemObject]?.parameters ??
+      []) as (ParameterObject | ReferenceObject)[];
+    const queryParamNames = parameters
+      .map((p) => resolveRef<ParameterObject>(p, context).schema)
+      .filter((s) => s.in === 'query')
+      .map((s) => s.name);
+    const headerParamNames = parameters
+      .map((p) => resolveRef<ParameterObject>(p, context).schema)
+      .filter((s) => s.in === 'header')
+      .map((s) => s.name)
+      .filter((n) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n));
+    const pathParamNames = props
+      .filter((p) => p.type === 'param')
+      .map((p) => p.name as string);
+
+    const requestTypeName = `${pascal(operationName)}Request`;
+    const intersectionParts: string[] = [];
+    if (body.definition) intersectionParts.push(body.definition);
+    if (queryParams) intersectionParts.push(queryParams.schema.name);
+    if (headers) intersectionParts.push(headers.schema.name);
+    let pathParamsTypeName = '';
+    let pathParamsTypeDef = '';
+    const namedPathParamSchemaNonMut = props.find(
+      (p) => p.type === 'namedPathParams',
+    )?.schema.name;
+    if (namedPathParamSchemaNonMut) {
+      intersectionParts.push(namedPathParamSchemaNonMut);
+    } else if (pathParamNames.length > 0) {
+      const pathDefs = props
+        .filter((p) => p.type === 'param')
+        .map((p) => p.definition)
+        .join(',\n ');
+      pathParamsTypeName = `${pascal(operationName)}PathParams`;
+      pathParamsTypeDef = `export type ${pathParamsTypeName} = {\n ${pathDefs}\n }`;
+      intersectionParts.push(pathParamsTypeName);
+    }
+    const requestTypeDef = `export type ${requestTypeName} = Expand<${
+      intersectionParts.length > 0
+        ? intersectionParts.join(' & ')
+        : 'Record<string, never>'
+    }>`;
+
+    const isValidIdent = (n: string) => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n);
+    const braceParamsAll = (pathRoute.match(/\{([^}]+)\}/g) ?? [])
+      .map((s) => s.slice(1, -1))
+      .filter(Boolean);
+    const templateParamsAll = (route.match(/\$\{([^}]+)\}/g) ?? []).map((s) =>
+      s.slice(2, -1),
+    );
+    const routeParamNames = [
+      ...new Set([...braceParamsAll, ...templateParamsAll]),
+    ].filter((element) => isValidIdent(element));
+    const validQuery = queryParamNames.filter((element) =>
+      isValidIdent(element),
+    );
+    const validHeader = headerParamNames.filter((element) =>
+      isValidIdent(element),
+    );
+    const namedPropAll = props.find((p) => p.type === 'namedPathParams');
+    const namedDestructAll =
+      namedPropAll?.destructured
+        .replaceAll(/[{}]/g, '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean) ?? [];
+    const namedSchemaModelAll = namedPropAll?.schema.model;
+    const namesFromModelAll =
+      namedDestructAll.length === 0 && namedSchemaModelAll
+        ? [
+            ...namedSchemaModelAll.matchAll(
+              /\n\s*([A-Za-z_$][A-Za-z0-9_$]*)\??:/g,
+            ),
+          ].map((m) => m[1])
+        : [];
+    const destructAllArray = [
+      ...new Set<string>([
+        ...pathParamNames,
+        ...routeParamNames,
+        ...namedDestructAll,
+        ...namesFromModelAll,
+        ...validQuery,
+        ...validHeader,
+      ]),
+    ];
+    const destructAll = destructAllArray.join(', ');
+    const hasDataSpreadAll = Boolean(body.definition && !usesFormPayload);
+    const hasDestructNamesAll = destructAll.length > 0;
+    const destructContentAll =
+      hasDestructNamesAll && hasDataSpreadAll
+        ? `${destructAll}, ...data`
+        : hasDestructNamesAll
+          ? destructAll
+          : hasDataSpreadAll
+            ? '...data'
+            : '';
+    const destructLineAll = destructContentAll
+      ? `\n  const { ${destructContentAll} } = request;`
+      : '';
+    const paramsInit = queryParams
+      ? `const params = { ${queryParamNames
+          .map((n: string) => (isValidIdent(n) ? n : `'${n}': request['${n}']`))
+          .join(', ')} };`
+      : '';
+    const headersInit = headers
+      ? `const headers = { ${headerParamNames
+          .map((n: string) => (isValidIdent(n) ? n : `'${n}': request['${n}']`))
+          .join(', ')} };`
+      : '';
+
+    // Ensure function is exported by placing it first (the caller prefixes implementation with 'export ')
+    const hasRequest = intersectionParts.length > 0;
+    return hasRequest
+      ? `const ${operationName} = <TData = AxiosResponse<${
+          response.definition.success || 'unknown'
+        }>>(\n    request: ${requestTypeName}${isRequestOptions ? `, options?: AxiosRequestConfig` : ''}\n  ): Promise<TData> => {${destructLineAll}
+    ${bodyFormReplaced}
+  ${paramsInit}
+  ${headersInit}
+    return axios${
+      isSyntheticDefaultImportsAllowed ? '' : '.default'
+    }.${verb}(${options});
+  }
+\n${requestTypeDef}${pathParamsTypeDef ? `\n${pathParamsTypeDef}` : ''}
+`
+      : `const ${operationName} = <TData = AxiosResponse<${
+          response.definition.success || 'unknown'
+        }>>(${isRequestOptions ? `options?: AxiosRequestConfig` : ''}): Promise<TData> => {${bodyForm}
+    return axios${
+      isSyntheticDefaultImportsAllowed ? '' : '.default'
+    }.${verb}(${options});
+  }
+`;
+  }
+
   return `const ${operationName} = <TData = AxiosResponse<${
     response.definition.success || 'unknown'
   }>>(\n    ${toObjectString(props, 'implementation')} ${
     isRequestOptions ? `options?: AxiosRequestConfig\n` : ''
   } ): Promise<TData> => {${bodyForm}
-    return axios${
-      isSyntheticDefaultImportsAllowed ? '' : '.default'
-    }.${verb}(${options});
-  }
+      return axios${
+        isSyntheticDefaultImportsAllowed ? '' : '.default'
+      }.${verb}(${options});
+    }
 `;
 };
 

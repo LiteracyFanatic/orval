@@ -363,6 +363,8 @@ export const normalizeOptions = async (
             : (outputOptions.override?.enumGenerationType ?? 'const'),
         suppressReadonlyModifier:
           outputOptions.override?.suppressReadonlyModifier || false,
+        useSingleRequestArgument:
+          outputOptions.override?.useSingleRequestArgument ?? false,
       },
       allParamsOptional: outputOptions.allParamsOptional ?? false,
       urlEncodeParameters: outputOptions.urlEncodeParameters ?? false,

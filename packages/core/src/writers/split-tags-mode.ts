@@ -13,7 +13,11 @@ import {
 import { getMockFileExtensionByTypeName } from '../utils/file-extensions';
 import { generateImportsForBuilder } from './generate-imports-for-builder';
 import { generateTargetForTags } from './target-tags';
-import { getOrvalGeneratedTypes, getTypedResponse } from './types';
+import {
+  getExpandHelper,
+  getOrvalGeneratedTypes,
+  getTypedResponse,
+} from './types';
 
 export const writeSplitTagsMode = async ({
   builder,
@@ -114,7 +118,10 @@ export const writeSplitTagsMode = async ({
           : upath.join(dirname, filename + '.schemas' + extension);
 
         if (schemasPath && needSchema) {
-          const schemasData = header + generateModelsInline(builder.schemas);
+          let schemasData = header + generateModelsInline(builder.schemas);
+          if (implementation.includes('Expand<')) {
+            schemasData += '\n' + getExpandHelper();
+          }
 
           await fs.outputFile(schemasPath, schemasData);
         }
@@ -168,6 +175,11 @@ export const writeSplitTagsMode = async ({
         if (implementation.includes('TypedResponse<')) {
           implementationData += getTypedResponse();
           implementationData += '\n';
+        }
+
+        if (implementation.includes('Expand<')) {
+          // Import Expand helper from schemas
+          implementationData += `\nimport type { Expand } from '${relativeSchemasPath}/__orval__';\n`;
         }
 
         implementationData += `\n${implementation}`;

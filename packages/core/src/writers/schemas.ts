@@ -3,6 +3,7 @@ import fs from 'fs-extra';
 import { generateImports } from '../generators';
 import { type GeneratorSchema, NamingConvention } from '../types';
 import { conventionName, upath } from '../utils';
+import { getExpandHelper } from './types';
 
 const getSchema = ({
   schema: { imports, model },
@@ -114,6 +115,10 @@ export const writeSchemas = async ({
   header: string;
   indexFiles: boolean;
 }) => {
+  // Always ensure a shared helpers file exists for types like Expand
+  const helperFile = upath.join(schemaPath, `/__orval__${fileExtension}`);
+  await fs.outputFile(helperFile, `${header}\n${getExpandHelper()}`);
+
   await Promise.all(
     schemas.map((schema) =>
       writeSchema({
