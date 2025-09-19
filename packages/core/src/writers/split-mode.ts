@@ -12,7 +12,11 @@ import {
 import { getMockFileExtensionByTypeName } from '../utils/file-extensions';
 import { generateImportsForBuilder } from './generate-imports-for-builder';
 import { generateTarget } from './target';
-import { getOrvalGeneratedTypes, getTypedResponse } from './types';
+import {
+  getExpandHelper,
+  getOrvalGeneratedTypes,
+  getTypedResponse,
+} from './types';
 
 export const writeSplitMode = async ({
   builder,
@@ -100,7 +104,11 @@ export const writeSplitMode = async ({
       : upath.join(dirname, filename + '.schemas' + extension);
 
     if (schemasPath && needSchema) {
-      const schemasData = header + generateModelsInline(builder.schemas);
+      let schemasData = header + generateModelsInline(builder.schemas);
+      // If any implementation uses Expand, ensure the helper is available in the schemas file
+      if (implementation.includes('Expand<')) {
+        schemasData += '\n' + getExpandHelper();
+      }
 
       await fs.outputFile(
         upath.join(dirname, filename + '.schemas' + extension),
@@ -151,6 +159,15 @@ export const writeSplitMode = async ({
     if (implementation.includes('TypedResponse<')) {
       implementationData += getTypedResponse();
       implementationData += '\n';
+    }
+
+    // If implementation uses Expand<>, ensure we import it once
+    if (implementation.includes('Expand<')) {
+      const importLine = output.schemas
+        ? `import type { Expand } from '${relativeSchemasPath}/__orval__';\n`
+        : `import type { Expand } from '${relativeSchemasPath}';\n`;
+      // place before implementation code
+      implementationData += `\n${importLine}`;
     }
 
     implementationData += `\n${implementation}`;

@@ -80,6 +80,12 @@ export type NormalizedOverrideOutput = {
   formUrlEncoded: boolean | NormalizedMutator;
   paramsSerializer?: NormalizedMutator;
   paramsSerializerOptions?: NormalizedParamsSerializerOptions;
+  /**
+   * When true, generate request types that include path params and update axios client
+   * to accept a single request argument that destructures path params and uses the rest
+   * as the request body data.
+   */
+  useSingleRequestArgument?: boolean;
   namingConvention: {
     enum?: NamingConvention;
   };
@@ -419,6 +425,12 @@ export type OverrideOutput = {
   formUrlEncoded?: boolean | Mutator;
   paramsSerializer?: Mutator;
   paramsSerializerOptions?: ParamsSerializerOptions;
+  /**
+   * When true, generate request types that include path params and update axios client
+   * to accept a single request argument that destructures path params and uses the rest
+   * as the request body data.
+   */
+  useSingleRequestArgument?: boolean;
   namingConvention?: {
     enum?: NamingConvention;
   };

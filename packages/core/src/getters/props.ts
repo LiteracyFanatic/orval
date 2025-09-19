@@ -58,8 +58,12 @@ export const getProps = ({
   };
 
   let paramGetterProps: GetterProps;
-  if (context.output.override.useNamedParameters && params.length > 0) {
-    const parameterTypeName = `${pascal(operationName)}PathParameters`;
+  if (
+    (context.output.override.useNamedParameters ||
+      context.output.override.useSingleRequestArgument) &&
+    params.length > 0
+  ) {
+    const parameterTypeName = `${pascal(operationName)}PathParams`;
 
     const name = 'pathParams';
 
